@@ -64,13 +64,18 @@ export function ensureContainerRuntimeRunning(): void {
     } catch (err) {
       lastErr = err;
       const remaining = Math.round((deadline - Date.now()) / 1000);
-      logger.warn(`Container runtime not ready, retrying (${remaining}s left)…`);
+      logger.warn(
+        `Container runtime not ready, retrying (${remaining}s left)…`,
+      );
       // Synchronous sleep — acceptable at startup before the event loop is busy.
       execSync(`sleep ${POLL_MS / 1000}`, { stdio: 'pipe' });
     }
   }
 
-  logger.error({ err: lastErr }, 'Failed to reach container runtime after 60 s');
+  logger.error(
+    { err: lastErr },
+    'Failed to reach container runtime after 60 s',
+  );
   console.error(
     '\n╔════════════════════════════════════════════════════════════════╗',
   );

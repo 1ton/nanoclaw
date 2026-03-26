@@ -46,7 +46,10 @@ async function sendTelegramMessage(
       if (markdownErr?.error_code === 429) {
         const retryAfter = (markdownErr?.parameters?.retry_after ?? 5) * 1000;
         if (attempt < MAX_RETRIES) {
-          logger.warn({ retryAfter, attempt }, 'Telegram rate limit, retrying…');
+          logger.warn(
+            { retryAfter, attempt },
+            'Telegram rate limit, retrying…',
+          );
           await new Promise((r) => setTimeout(r, retryAfter));
           continue;
         }
@@ -283,8 +286,12 @@ export class TelegramChannel implements Channel {
         (replied.audio ? '[Audio]' : undefined) ||
         (replied.photo ? '[Photo]' : undefined) ||
         (replied.video ? '[Video]' : undefined) ||
-        (replied.document ? `[File: ${replied.document.file_name || 'file'}]` : undefined) ||
-        (replied.sticker ? `[Sticker ${replied.sticker.emoji || ''}]` : undefined) ||
+        (replied.document
+          ? `[File: ${replied.document.file_name || 'file'}]`
+          : undefined) ||
+        (replied.sticker
+          ? `[Sticker ${replied.sticker.emoji || ''}]`
+          : undefined) ||
         '[Message]';
       return { sender_name: senderName, content };
     };
@@ -409,22 +416,42 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:photo', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
-      if (!group) { storeNonText(ctx, '[Photo]'); return; }
+      if (!group) {
+        storeNonText(ctx, '[Photo]');
+        return;
+      }
       const photos = ctx.message.photo as any[] | undefined;
-      if (!photos || photos.length === 0) { storeNonText(ctx, '[Photo]'); return; }
+      if (!photos || photos.length === 0) {
+        storeNonText(ctx, '[Photo]');
+        return;
+      }
       const photo = photos[photos.length - 1];
-      const ts = new Date(ctx.message.date * 1000).toISOString().replace(/[:.]/g, '-');
+      const ts = new Date(ctx.message.date * 1000)
+        .toISOString()
+        .replace(/[:.]/g, '-');
       const filename = `photo-${ts}.jpg`;
-      const containerPath = await this.downloadAndSaveFile(photo.file_id, filename, group.folder);
+      const containerPath = await this.downloadAndSaveFile(
+        photo.file_id,
+        filename,
+        group.folder,
+      );
       const caption = ctx.message.caption ? `\n${ctx.message.caption}` : '';
-      storeNonText(ctx, containerPath ? `[Image: ${containerPath}]${caption}` : `[Photo]${caption}`);
+      storeNonText(
+        ctx,
+        containerPath
+          ? `[Image: ${containerPath}]${caption}`
+          : `[Photo]${caption}`,
+      );
     });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', async (ctx) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       const voice = ctx.message.voice;
-      if (!group || !voice) { storeNonText(ctx, '[Voice message]'); return; }
+      if (!group || !voice) {
+        storeNonText(ctx, '[Voice message]');
+        return;
+      }
 
       // Download voice to temp file, transcribe locally, then clean up
       try {
@@ -451,10 +478,22 @@ export class TelegramChannel implements Channel {
       const group = this.opts.registeredGroups()[chatJid];
       const doc = ctx.message.document;
       const name = doc?.file_name || 'file';
-      if (!group || !doc) { storeNonText(ctx, `[Document: ${name}]`); return; }
-      const containerPath = await this.downloadAndSaveFile(doc.file_id, name, group.folder);
+      if (!group || !doc) {
+        storeNonText(ctx, `[Document: ${name}]`);
+        return;
+      }
+      const containerPath = await this.downloadAndSaveFile(
+        doc.file_id,
+        name,
+        group.folder,
+      );
       const caption = ctx.message.caption ? `\n${ctx.message.caption}` : '';
-      storeNonText(ctx, containerPath ? `[File: ${containerPath}]${caption}` : `[Document: ${name}]${caption}`);
+      storeNonText(
+        ctx,
+        containerPath
+          ? `[File: ${containerPath}]${caption}`
+          : `[Document: ${name}]${caption}`,
+      );
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
