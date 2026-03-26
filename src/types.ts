@@ -51,6 +51,11 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
+  /** The message this is a reply to, if any */
+  reply_to?: {
+    sender_name: string;
+    content: string;
+  };
 }
 
 export interface ScheduledTask {

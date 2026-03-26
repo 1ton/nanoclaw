@@ -1,7 +1,11 @@
+import fs from 'fs';
 import https from 'https';
+import os from 'os';
+import path from 'path';
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
+import { transcribeAudio } from '../transcription.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -29,16 +33,60 @@ async function sendTelegramMessage(
   text: string,
   options: { message_thread_id?: number } = {},
 ): Promise<void> {
-  try {
-    await api.sendMessage(chatId, text, {
-      ...options,
-      parse_mode: 'Markdown',
-    });
-  } catch (err) {
-    // Fallback: send as plain text if Markdown parsing fails
-    logger.debug({ err }, 'Markdown send failed, falling back to plain text');
-    await api.sendMessage(chatId, text, options);
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      await api.sendMessage(chatId, text, {
+        ...options,
+        parse_mode: 'Markdown',
+      });
+      return;
+    } catch (markdownErr: any) {
+      // Rate limit — wait and retry
+      if (markdownErr?.error_code === 429) {
+        const retryAfter = (markdownErr?.parameters?.retry_after ?? 5) * 1000;
+        if (attempt < MAX_RETRIES) {
+          logger.warn({ retryAfter, attempt }, 'Telegram rate limit, retrying…');
+          await new Promise((r) => setTimeout(r, retryAfter));
+          continue;
+        }
+        throw markdownErr;
+      }
+      // Markdown parse error — retry once as plain text
+      try {
+        await api.sendMessage(chatId, text, options);
+        return;
+      } catch (plainErr: any) {
+        if (plainErr?.error_code === 429) {
+          const retryAfter = (plainErr?.parameters?.retry_after ?? 5) * 1000;
+          if (attempt < MAX_RETRIES) {
+            logger.warn(
+              { retryAfter, attempt },
+              'Telegram rate limit on plain text, retrying…',
+            );
+            await new Promise((r) => setTimeout(r, retryAfter));
+            continue;
+          }
+        }
+        throw plainErr;
+      }
+    }
   }
+}
+
+function downloadToFile(url: string, destPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath);
+    https
+      .get(url, (res) => {
+        res.pipe(file);
+        file.on('finish', () => file.close(() => resolve()));
+      })
+      .on('error', (err) => {
+        fs.unlink(destPath, () => {});
+        reject(err);
+      });
+  });
 }
 
 // Bot pool for agent teams: send-only Api instances (no polling)
@@ -46,6 +94,8 @@ const poolApis: Api[] = [];
 // Maps "{groupFolder}:{senderName}" → pool Api index for stable assignment
 const senderBotMap = new Map<string, number>();
 let nextPoolIndex = 0;
+// Main bot API — set when TelegramChannel connects, used as fallback by pool
+let mainBotApi: Api | null = null;
 
 /**
  * Initialize send-only Api instances for the bot pool.
@@ -106,26 +156,47 @@ export async function sendPoolMessage(
   }
 
   const api = poolApis[idx];
-  try {
-    const numericId = chatId.replace(/^tg:/, '');
-    const MAX_LENGTH = 4096;
-    if (text.length <= MAX_LENGTH) {
-      await sendTelegramMessage(api, numericId, text);
-    } else {
-      for (let i = 0; i < text.length; i += MAX_LENGTH) {
-        await sendTelegramMessage(
-          api,
-          numericId,
-          text.slice(i, i + MAX_LENGTH),
+  const numericId = chatId.replace(/^tg:/, '');
+  const MAX_LENGTH = 4096;
+  const chunks =
+    text.length <= MAX_LENGTH
+      ? [text]
+      : Array.from({ length: Math.ceil(text.length / MAX_LENGTH) }, (_, i) =>
+          text.slice(i * MAX_LENGTH, (i + 1) * MAX_LENGTH),
         );
-      }
+
+  try {
+    for (const chunk of chunks) {
+      await sendTelegramMessage(api, numericId, chunk);
     }
     logger.info(
       { chatId, sender, poolIndex: idx, length: text.length },
       'Pool message sent',
     );
   } catch (err) {
-    logger.error({ chatId, sender, err }, 'Failed to send pool message');
+    logger.error(
+      { chatId, sender, err },
+      'Pool bot failed — falling back to main bot',
+    );
+    // Fall back to main bot so the message is never silently dropped
+    if (mainBotApi) {
+      try {
+        for (const chunk of chunks) {
+          await sendTelegramMessage(mainBotApi, numericId, chunk);
+        }
+        logger.info(
+          { chatId, sender, length: text.length },
+          'Pool message sent via main bot fallback',
+        );
+      } catch (fallbackErr) {
+        logger.error(
+          { chatId, sender, fallbackErr },
+          'Main bot fallback also failed — message lost',
+        );
+      }
+    } else {
+      logger.error({ chatId }, 'No main bot available for fallback');
+    }
   }
 }
 
@@ -141,12 +212,34 @@ export class TelegramChannel implements Channel {
     this.opts = opts;
   }
 
+  private async downloadAndSaveFile(
+    fileId: string,
+    filename: string,
+    groupFolder: string,
+  ): Promise<string | null> {
+    try {
+      const file = await this.bot!.api.getFile(fileId);
+      if (!file.file_path) return null;
+      const attachmentsDir = path.join(GROUPS_DIR, groupFolder, 'attachments');
+      fs.mkdirSync(attachmentsDir, { recursive: true });
+      const destPath = path.join(attachmentsDir, filename);
+      const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+      await downloadToFile(url, destPath);
+      logger.info({ filename, groupFolder }, 'Telegram file downloaded');
+      return `/workspace/group/attachments/${filename}`;
+    } catch (err) {
+      logger.warn({ fileId, err }, 'Failed to download Telegram file');
+      return null;
+    }
+  }
+
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken, {
       client: {
         baseFetchConfig: { agent: https.globalAgent, compress: true },
       },
     });
+    mainBotApi = this.bot.api;
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -171,6 +264,30 @@ export class TelegramChannel implements Channel {
     // Telegram bot commands handled above — skip them in the general handler
     // so they don't also get stored as messages. All other /commands flow through.
     const TELEGRAM_BOT_COMMANDS = new Set(['chatid', 'ping']);
+
+    /** Extract reply context from a Telegram message, if present. */
+    const extractReplyTo = (
+      msg: any,
+    ): { sender_name: string; content: string } | undefined => {
+      const replied = msg.reply_to_message;
+      if (!replied) return undefined;
+      const senderName =
+        replied.from?.first_name ||
+        replied.from?.username ||
+        replied.from?.id?.toString() ||
+        'Unknown';
+      const content =
+        replied.text ||
+        replied.caption ||
+        (replied.voice ? '[Voice message]' : undefined) ||
+        (replied.audio ? '[Audio]' : undefined) ||
+        (replied.photo ? '[Photo]' : undefined) ||
+        (replied.video ? '[Video]' : undefined) ||
+        (replied.document ? `[File: ${replied.document.file_name || 'file'}]` : undefined) ||
+        (replied.sticker ? `[Sticker ${replied.sticker.emoji || ''}]` : undefined) ||
+        '[Message]';
+      return { sender_name: senderName, content };
+    };
 
     this.bot.on('message:text', async (ctx) => {
       if (ctx.message.text.startsWith('/')) {
@@ -245,6 +362,7 @@ export class TelegramChannel implements Channel {
         content,
         timestamp,
         is_from_me: false,
+        reply_to: extractReplyTo(ctx.message),
       });
 
       logger.info(
@@ -284,16 +402,59 @@ export class TelegramChannel implements Channel {
         content: `${placeholder}${caption}`,
         timestamp,
         is_from_me: false,
+        reply_to: extractReplyTo(ctx.message),
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) { storeNonText(ctx, '[Photo]'); return; }
+      const photos = ctx.message.photo as any[] | undefined;
+      if (!photos || photos.length === 0) { storeNonText(ctx, '[Photo]'); return; }
+      const photo = photos[photos.length - 1];
+      const ts = new Date(ctx.message.date * 1000).toISOString().replace(/[:.]/g, '-');
+      const filename = `photo-${ts}.jpg`;
+      const containerPath = await this.downloadAndSaveFile(photo.file_id, filename, group.folder);
+      const caption = ctx.message.caption ? `\n${ctx.message.caption}` : '';
+      storeNonText(ctx, containerPath ? `[Image: ${containerPath}]${caption}` : `[Photo]${caption}`);
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
+    this.bot.on('message:voice', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      const voice = ctx.message.voice;
+      if (!group || !voice) { storeNonText(ctx, '[Voice message]'); return; }
+
+      // Download voice to temp file, transcribe locally, then clean up
+      try {
+        const file = await this.bot!.api.getFile(voice.file_id);
+        if (file.file_path) {
+          const tmpPath = path.join(os.tmpdir(), `tg-voice-${Date.now()}.oga`);
+          const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+          await downloadToFile(url, tmpPath);
+          const transcript = await transcribeAudio(tmpPath);
+          fs.unlink(tmpPath, () => {});
+          if (transcript) {
+            storeNonText(ctx, `[Voice: ${transcript}]`);
+            return;
+          }
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Voice transcription failed, storing placeholder');
+      }
+      storeNonText(ctx, '[Voice message]');
+    });
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+    this.bot.on('message:document', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      const doc = ctx.message.document;
+      const name = doc?.file_name || 'file';
+      if (!group || !doc) { storeNonText(ctx, `[Document: ${name}]`); return; }
+      const containerPath = await this.downloadAndSaveFile(doc.file_id, name, group.folder);
+      const caption = ctx.message.caption ? `\n${ctx.message.caption}` : '';
+      storeNonText(ctx, containerPath ? `[File: ${containerPath}]${caption}` : `[Document: ${name}]${caption}`);
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
@@ -307,10 +468,27 @@ export class TelegramChannel implements Channel {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Start polling — returns a Promise that resolves when started
+    // Start polling. Resolve as soon as Telegram confirms the bot is online,
+    // or after 30 s — whichever comes first. grammY continues retrying in the
+    // background, so the bot recovers automatically when the network is ready.
     return new Promise<void>((resolve) => {
+      let resolved = false;
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          logger.warn(
+            'Telegram API did not respond within 30 s — continuing startup. Bot will connect when network is available.',
+          );
+          resolve();
+        }
+      }, 30_000);
+
       this.bot!.start({
         onStart: (botInfo) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+          }
           logger.info(
             { username: botInfo.username, id: botInfo.id },
             'Telegram bot connected',

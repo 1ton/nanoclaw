@@ -25,6 +25,7 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
+  ensureOneCLIRunning,
 } from './container-runtime.js';
 import {
   getAllChats,
@@ -490,13 +491,14 @@ function recoverPendingMessages(): void {
   }
 }
 
-function ensureContainerSystemRunning(): void {
+async function ensureContainerSystemRunning(): Promise<void> {
   ensureContainerRuntimeRunning();
+  await ensureOneCLIRunning(ONECLI_URL);
   cleanupOrphans();
 }
 
 async function main(): Promise<void> {
-  ensureContainerSystemRunning();
+  await ensureContainerSystemRunning();
   initDatabase();
   logger.info('Database initialized');
   loadState();
