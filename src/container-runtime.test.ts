@@ -50,29 +50,42 @@ describe('stopContainer', () => {
 
 describe('ensureContainerRuntimeRunning', () => {
   it('does nothing when runtime is already running', () => {
-    mockExecSync.mockReturnValueOnce('');
+    // On macOS, open -a Docker is called first, then docker info succeeds
+    mockExecSync.mockReturnValue('');
 
     ensureContainerRuntimeRunning();
 
-    expect(mockExecSync).toHaveBeenCalledTimes(1);
     expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} info`, {
       stdio: 'pipe',
       timeout: 10000,
     });
-    expect(logger.debug).toHaveBeenCalledWith(
-      'Container runtime already running',
-    );
+    expect(logger.debug).toHaveBeenCalledWith('Container runtime ready');
   });
 
-  it('throws when docker info fails', () => {
-    mockExecSync.mockImplementationOnce(() => {
-      throw new Error('Cannot connect to the Docker daemon');
+  it('throws when docker info fails repeatedly', () => {
+    // Simulate docker info failing; sleep and open succeed
+    mockExecSync.mockImplementation((cmd: string) => {
+      if ((cmd as string).includes('info')) {
+        throw new Error('Cannot connect to the Docker daemon');
+      }
+      // open -a Docker and sleep succeed silently
+    });
+
+    // Use fake timers to skip the 60s deadline
+    const realDateNow = Date.now;
+    let callCount = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => {
+      // After a few calls, report deadline exceeded
+      callCount++;
+      return callCount > 5 ? realDateNow() + 120_000 : realDateNow();
     });
 
     expect(() => ensureContainerRuntimeRunning()).toThrow(
       'Container runtime is required but failed to start',
     );
     expect(logger.error).toHaveBeenCalled();
+
+    vi.restoreAllMocks();
   });
 });
 
