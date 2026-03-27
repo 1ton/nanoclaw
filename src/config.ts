@@ -11,6 +11,11 @@ const envConfig = readEnvFile([
   'ONECLI_URL',
   'TZ',
   'TELEGRAM_BOT_POOL',
+  'WHISPER_BIN',
+  'WHISPER_MODEL',
+  'WHISPER_LANG',
+  'BROWSER_USER_AGENT',
+  'BROWSER_DISABLE_AUTOMATION',
 ]);
 
 export const ASSISTANT_NAME =
@@ -92,6 +97,26 @@ function resolveConfigTimezone(): string {
   return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+
+// Voice transcription (whisper.cpp)
+export const WHISPER_BIN =
+  process.env.WHISPER_BIN || envConfig.WHISPER_BIN || 'whisper-cli';
+export const WHISPER_MODEL =
+  process.env.WHISPER_MODEL ||
+  envConfig.WHISPER_MODEL ||
+  'data/models/ggml-small.bin';
+export const WHISPER_LANG =
+  process.env.WHISPER_LANG || envConfig.WHISPER_LANG || 'ru';
+
+// Browser anti-detection settings for agent-browser
+const SAFARI_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15';
+export const BROWSER_USER_AGENT =
+  process.env.BROWSER_USER_AGENT || envConfig.BROWSER_USER_AGENT || SAFARI_UA;
+export const BROWSER_DISABLE_AUTOMATION =
+  (process.env.BROWSER_DISABLE_AUTOMATION ||
+    envConfig.BROWSER_DISABLE_AUTOMATION ||
+    'true') !== 'false';
 
 export const TELEGRAM_BOT_POOL = (
   process.env.TELEGRAM_BOT_POOL ||

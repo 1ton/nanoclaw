@@ -7,6 +7,8 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  BROWSER_DISABLE_AUTOMATION,
+  BROWSER_USER_AGENT,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
@@ -232,15 +234,14 @@ async function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
-  // Use Safari user-agent and disable automation detection for agent-browser
-  args.push(
-    '-e',
-    'AGENT_BROWSER_USER_AGENT=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15',
-  );
-  args.push(
-    '-e',
-    'AGENT_BROWSER_ARGS=--disable-blink-features=AutomationControlled',
-  );
+  // Browser anti-detection settings (configurable via .env)
+  args.push('-e', `AGENT_BROWSER_USER_AGENT=${BROWSER_USER_AGENT}`);
+  if (BROWSER_DISABLE_AUTOMATION) {
+    args.push(
+      '-e',
+      'AGENT_BROWSER_ARGS=--disable-blink-features=AutomationControlled',
+    );
+  }
 
   // OneCLI gateway handles credential injection — containers never see real secrets.
   // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
@@ -445,15 +446,15 @@ export async function runContainerAgent(
         { group: group.name, containerName },
         'Container timeout, stopping gracefully',
       );
-      exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn(
-            { group: group.name, containerName, err },
-            'Graceful stop failed, force killing',
-          );
-          container.kill('SIGKILL');
-        }
-      });
+      try {
+        stopContainer(containerName);
+      } catch (err) {
+        logger.warn(
+          { group: group.name, containerName, err },
+          'Graceful stop failed, force killing',
+        );
+        container.kill('SIGKILL');
+      }
     };
 
     let timeout = setTimeout(killOnTimeout, timeoutMs);

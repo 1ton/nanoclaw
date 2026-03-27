@@ -8,13 +8,10 @@ import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 
+import { WHISPER_BIN, WHISPER_LANG, WHISPER_MODEL } from './config.js';
 import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
-
-const WHISPER_BIN = process.env.WHISPER_BIN || 'whisper-cli';
-const WHISPER_MODEL = process.env.WHISPER_MODEL || 'data/models/ggml-small.bin';
-const WHISPER_LANG = process.env.WHISPER_LANG || 'ru';
 
 /** Transcribe an audio file using whisper.cpp. Returns null on failure. */
 export async function transcribeAudio(
@@ -44,7 +41,16 @@ export async function transcribeAudio(
   try {
     const { stdout } = await execFileAsync(
       WHISPER_BIN,
-      ['-m', WHISPER_MODEL, '-f', wavPath, '--no-timestamps', '-nt', '-l', WHISPER_LANG],
+      [
+        '-m',
+        WHISPER_MODEL,
+        '-f',
+        wavPath,
+        '--no-timestamps',
+        '-nt',
+        '-l',
+        WHISPER_LANG,
+      ],
       { timeout: 60_000 },
     );
     const text = stdout.trim();

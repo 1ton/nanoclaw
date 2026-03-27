@@ -16,6 +16,8 @@ vi.mock('./config.js', () => ({
   IDLE_TIMEOUT: 1800000, // 30min
   ONECLI_URL: 'http://localhost:10254',
   TIMEZONE: 'America/Los_Angeles',
+  BROWSER_USER_AGENT: 'Mozilla/5.0 TestSafari',
+  BROWSER_DISABLE_AUTOMATION: true,
 }));
 
 // Mock logger
